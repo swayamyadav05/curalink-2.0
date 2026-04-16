@@ -16,6 +16,7 @@ const envSchema = z.object({
     .min(100)
     .default(2000),
   CORS_ORIGIN: z.string().default("http://localhost:5173"),
+  AI_SERVICE_URL: z.string().url().default("http://localhost:8000"),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

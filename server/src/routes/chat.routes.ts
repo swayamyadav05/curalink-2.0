@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { z } from "zod";
 
 import { Conversation, Message, User } from "../models";
+import { callAIResearch } from "../services/ai.service";
 import { ApiError } from "../utils/ApiError";
 import { okResponse } from "../utils/ApiResponse";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -74,36 +75,92 @@ chatRouter.post(
       wasConversationCreated = true;
     }
 
-    if (payload.disease || payload.location) {
-      conversation.context = {
-        ...conversation.context,
-        disease: payload.disease ?? conversation.context.disease,
-        location: payload.location ?? conversation.context.location,
-        topics: conversation.context.topics ?? [],
-      };
-
-      await conversation.save();
-    }
-
     const userMessage = await Message.create({
       conversationId: conversation._id,
       role: "user",
       content: payload.message,
     });
 
-    const assistantMessage = await Message.create({
+    const recentMessages = await Message.find({
       conversationId: conversation._id,
-      role: "assistant",
-      content:
-        "This is a placeholder response. AI pipeline will be connected on Day 2.",
-      structured: {
-        overview: "...",
-        insights: "...",
-        trialSummary: "...",
-      },
-      publications: [],
-      clinicalTrials: [],
-    });
+    })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .select({ role: 1, content: 1 })
+      .lean();
+
+    const conversationHistory = recentMessages
+      .reverse()
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+
+    const disease = payload.disease ?? conversation.context?.disease;
+    const location =
+      payload.location ?? conversation.context?.location;
+
+    let assistantMessage;
+
+    try {
+      const aiResponse = await callAIResearch({
+        query: payload.message,
+        disease,
+        location,
+        conversationHistory,
+      });
+
+      assistantMessage = await Message.create({
+        conversationId: conversation._id,
+        role: "assistant",
+        content:
+          aiResponse.structured.overview ||
+          "No overview available from research service.",
+        structured: {
+          overview: aiResponse.structured.overview,
+          insights: aiResponse.structured.insights,
+          trialSummary: aiResponse.structured.trialSummary,
+        },
+        publications: aiResponse.publications.map((publication) => ({
+          title: publication.title,
+          authors: publication.authors,
+          year: publication.year,
+          source: publication.source,
+          url: publication.url,
+          abstract: publication.abstract,
+          relevanceScore: publication.relevanceScore,
+        })),
+        clinicalTrials: aiResponse.clinicalTrials.map((trial) => ({
+          title: trial.title,
+          status: trial.status,
+          eligibility: trial.eligibility,
+          location: trial.location,
+          contact: trial.contact,
+          url: trial.url,
+        })),
+      });
+    } catch (_error) {
+      assistantMessage = await Message.create({
+        conversationId: conversation._id,
+        role: "assistant",
+        content:
+          "I'm having trouble connecting to the research service. Please try again.",
+        publications: [],
+        clinicalTrials: [],
+      });
+    }
+
+    conversation.context = {
+      ...conversation.context,
+      disease: payload.disease ?? conversation.context?.disease,
+      location: payload.location ?? conversation.context?.location,
+      topics: [
+        ...(conversation.context?.topics ?? []),
+        payload.message,
+      ],
+    };
+
+    await conversation.save();
 
     return res.status(wasConversationCreated ? 201 : 200).json(
       okResponse(

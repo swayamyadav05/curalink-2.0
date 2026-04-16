@@ -102,15 +102,31 @@ def _build_structured_content_from_reasoning(raw_text: str) -> tuple[StructuredC
                 True,
             )
 
-    fallback_overview = (raw_text or "").strip() or "No reasoning output was produced."
     return (
         StructuredContent(
-            overview=fallback_overview,
+            overview="",
             insights="",
             trialSummary="",
         ),
         False,
     )
+
+
+def _is_ranking_placeholder_content(content: StructuredContent) -> bool:
+    combined = " ".join(
+        [
+            (content.overview or "").lower(),
+            (content.insights or "").lower(),
+            (content.trialSummary or "").lower(),
+        ]
+    )
+    placeholder_signals = [
+        "fetched",
+        "ranked top",
+        "detailed research analysis coming in the next step",
+        "showing top",
+    ]
+    return all(signal in combined for signal in placeholder_signals)
 
 
 @app.post("/api/research", response_model=ResearchResponse)
@@ -214,12 +230,41 @@ async def research(request: ResearchRequest) -> ResearchResponse:
     )
 
     try:
+        logger.info(
+            "Calling medical reasoning agent with %d ranked publications and %d ranked trials",
+            len(ranked_publications),
+            len(ranked_trials),
+        )
         raw_reasoning_output = await asyncio.wait_for(run_medical_reasoning(reasoning_context), timeout=30)
         structured_content, parsed_as_json = _build_structured_content_from_reasoning(raw_reasoning_output)
-        if parsed_as_json:
+        if parsed_as_json and not _is_ranking_placeholder_content(structured_content):
             logger.info("Medical reasoning output parsed as strict JSON")
         else:
-            logger.warning("Medical reasoning output was malformed JSON; fallback extraction applied")
+            logger.warning(
+                "Medical reasoning output was malformed or placeholder-like; retrying with stricter JSON instruction"
+            )
+            retry_prompt = (
+                reasoning_context
+                + "\n\nIMPORTANT: Return ONLY valid JSON with exactly these keys: "
+                '{"overview":"...","insights":"...","trialSummary":"..."}. '
+                "Do not summarize counts of fetched/ranked items."
+            )
+            retry_output = await asyncio.wait_for(run_medical_reasoning(retry_prompt), timeout=20)
+            retry_structured, retry_parsed = _build_structured_content_from_reasoning(retry_output)
+
+            if retry_parsed and not _is_ranking_placeholder_content(retry_structured):
+                structured_content = retry_structured
+                logger.info("Medical reasoning retry returned valid structured JSON")
+            else:
+                logger.error("Medical reasoning retry did not return valid structured JSON")
+                structured_content = StructuredContent(
+                    overview=(
+                        "Medical reasoning output was unavailable in valid JSON format. "
+                        "Review the ranked publications and trials below."
+                    ),
+                    insights="",
+                    trialSummary="",
+                )
     except asyncio.TimeoutError:
         logger.warning("Medical reasoning timed out after 30 seconds; returning fallback structured summary")
         structured_content = StructuredContent(

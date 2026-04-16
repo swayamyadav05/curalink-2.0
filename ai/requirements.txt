@@ -1,0 +1,10 @@
+fastapi==0.136.0
+uvicorn[standard]==0.44.0
+pydantic==2.13.1
+pydantic-settings==2.13.1
+python-dotenv==1.2.2
+httpx==0.28.1
+agno==2.5.17
+ollama==0.6.1
+groq==1.1.2
+openai==2.32.0
